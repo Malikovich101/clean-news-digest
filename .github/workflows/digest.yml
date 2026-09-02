@@ -33,7 +33,7 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: gemini-3.6-flash
-        run: python -u digest.py
+        run: python -u run_digest.py
       - name: Commit state
         if: success()
         run: |
