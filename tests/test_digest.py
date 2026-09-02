@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timedelta, timezone
 
 from digest import (
@@ -26,11 +25,10 @@ def test_filter_local_removes_explicit_and_exact_duplicates():
         Post("b:2", "@b", "2026-09-02T05:01:00+00:00", "Одна важная новость сегодня!!!", "https://t.me/b/2"),
         Post("a:3", "@a", "2026-09-02T05:02:00+00:00", "#реклама Купите курс прямо сейчас", "https://t.me/a/3"),
     ]
-    kept, stats, suspicious = filter_local(posts)
+    kept, stats = filter_local(posts)
     assert len(kept) == 1
     assert stats.exact_duplicates == 1
     assert stats.ads == 1
-    assert len(suspicious) == 0
 
 
 def test_pending_slots_returns_earliest_uncompleted():
