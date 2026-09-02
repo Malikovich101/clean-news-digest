@@ -23,11 +23,11 @@ DEFAULT_MODELS = (
 # 404 can mean that a model is unavailable for the current account/project.
 RETRYABLE_API_CODES = {404, 429, 500, 502, 503, 504}
 
-# A Gemini request must never be allowed to hang until GitHub Actions kills
-# the whole job. The SDK timeout is in milliseconds.
-REQUEST_TIMEOUT_MS = 45_000
-MAX_ATTEMPTS_PER_MODEL = 2
-RETRY_DELAY_SECONDS = 2
+# One request has a hard 30-second network deadline. We do not retry the same
+# model: the next model is the retry. This keeps the whole digest bounded and
+# avoids burning free-tier quota on repeated calls to a failing model.
+REQUEST_TIMEOUT_MS = 30_000
+RETRY_DELAY_SECONDS = 1
 
 
 class GeminiUnavailable(RuntimeError):
@@ -54,56 +54,43 @@ def create_client(api_key: str) -> genai.Client:
     )
 
 
-def _is_retryable_api_error(exc: APIError) -> bool:
-    return getattr(exc, "code", None) in RETRYABLE_API_CODES
-
-
 def generate_json(
     client: genai.Client,
     prompt: str,
     parse: Callable[[str], dict],
 ) -> dict:
-    """Call Gemini with bounded retries and model fallback."""
+    """Call Gemini with bounded model fallback."""
     last_error: BaseException | None = None
 
-    for model in model_queue():
-        for attempt in range(1, MAX_ATTEMPTS_PER_MODEL + 1):
-            try:
-                print(f"[ai] model={model} attempt={attempt}", flush=True)
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config={"response_mime_type": "application/json"},
+    for index, model in enumerate(model_queue()):
+        try:
+            print(f"[ai] model={model} attempt=1", flush=True)
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config={"response_mime_type": "application/json"},
+            )
+            result = parse(response.text or "")
+            print(f"[ai] model={model} success", flush=True)
+            return result
+        except APIError as exc:
+            last_error = exc
+            code = getattr(exc, "code", "unknown")
+            if code not in RETRYABLE_API_CODES:
+                raise
+            if index < len(model_queue()) - 1:
+                print(f"[ai] model={model} error={code}; fallback", flush=True)
+                time.sleep(RETRY_DELAY_SECONDS)
+        except httpx.HTTPError as exc:
+            # Includes RemoteProtocolError, ConnectError, ConnectTimeout,
+            # ReadTimeout, WriteError and PoolTimeout.
+            last_error = exc
+            if index < len(model_queue()) - 1:
+                print(
+                    f"[ai] model={model} network={type(exc).__name__}; fallback",
+                    flush=True,
                 )
-                text = response.text or ""
-                result = parse(text)
-                print(f"[ai] model={model} success", flush=True)
-                return result
-            except APIError as exc:
-                last_error = exc
-                if not _is_retryable_api_error(exc):
-                    raise
-                code = getattr(exc, "code", "unknown")
-                if attempt < MAX_ATTEMPTS_PER_MODEL:
-                    print(f"[ai] model={model} error={code}; retrying", flush=True)
-                    time.sleep(RETRY_DELAY_SECONDS)
-                else:
-                    print(f"[ai] model={model} error={code}; fallback", flush=True)
-            except httpx.HTTPError as exc:
-                # Includes RemoteProtocolError, ConnectError, ConnectTimeout,
-                # ReadTimeout, WriteError and PoolTimeout.
-                last_error = exc
-                if attempt < MAX_ATTEMPTS_PER_MODEL:
-                    print(
-                        f"[ai] model={model} network={type(exc).__name__}; retrying",
-                        flush=True,
-                    )
-                    time.sleep(RETRY_DELAY_SECONDS)
-                else:
-                    print(
-                        f"[ai] model={model} network={type(exc).__name__}; fallback",
-                        flush=True,
-                    )
+                time.sleep(RETRY_DELAY_SECONDS)
 
     raise GeminiUnavailable(
         f"All Gemini models unavailable; last error: {last_error}"
