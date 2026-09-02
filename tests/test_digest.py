@@ -2,6 +2,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from digest import (
+    INITIAL_LOOKBACK_HOURS,
+    RECOVERY_LOOKBACK_HOURS,
     Post,
     StateStore,
     filter_local,
@@ -28,6 +30,7 @@ def test_filter_local_removes_explicit_and_exact_duplicates():
     assert len(kept) == 1
     assert stats.exact_duplicates == 1
     assert stats.ads == 1
+    assert len(suspicious) == 0
 
 
 def test_pending_slots_returns_earliest_uncompleted():
@@ -52,3 +55,19 @@ def test_split_telegram_respects_limit():
     chunks = split_telegram(text, 3900)
     assert len(chunks) == 3
     assert all(len(chunk) <= 3900 for chunk in chunks)
+
+
+def test_state_store_default_is_minimal(tmp_path):
+    state = StateStore(str(tmp_path / "state.json")).load()
+    assert state == {
+        "version": 1,
+        "watermarks": {},
+        "completed_slots": {},
+        "delivered_news": [],
+    }
+
+
+def test_first_run_lookback_is_shorter_than_recovery_lookback():
+    assert INITIAL_LOOKBACK_HOURS == 6
+    assert RECOVERY_LOOKBACK_HOURS == 9
+    assert INITIAL_LOOKBACK_HOURS < RECOVERY_LOOKBACK_HOURS
