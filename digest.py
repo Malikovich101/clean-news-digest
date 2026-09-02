@@ -17,6 +17,8 @@ UTC = timezone.utc
 PERM_TIMEZONE = timezone(timedelta(hours=5))
 TELEGRAM_LIMIT = 3900
 MEMORY_HOURS = 72
+INITIAL_LOOKBACK_HOURS = 6
+RECOVERY_LOOKBACK_HOURS = 9
 MIN_TEXT_LENGTH = 20
 MAX_AI_POST_CHARS = 1600
 MAX_AI_INPUT_CHARS = 48000
@@ -315,11 +317,16 @@ def require_env() -> None:
     missing = [key for key in required if not os.getenv(key)]
     if missing:
         raise RuntimeError("Не заданы обязательные secrets: " + ", ".join(missing))
+    if not os.getenv("GEMINI_API_KEY"):
+        raise RuntimeError("Не задан обязательный secret: GEMINI_API_KEY")
 
 
 def load_channels(path: str = "channels.txt") -> list[str]:
     lines = Path(path).read_text(encoding="utf-8").splitlines()
-    return [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+    channels = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+    if not channels:
+        raise RuntimeError("channels.txt пуст")
+    return channels
 
 
 def telegram_send(text: str) -> None:
@@ -375,9 +382,15 @@ def main() -> None:
     slot_name, slot_key = pending
 
     channels = load_channels()
-    # Keep a bounded lookback so a delayed run can collect the missing window.
-    since = now_utc - timedelta(hours=9)
-    telegram = TelegramClient(StringSession(os.environ["TG_SESSION_STRING"]), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"])
+    has_watermarks = bool(state.get("watermarks"))
+    lookback_hours = RECOVERY_LOOKBACK_HOURS if has_watermarks else INITIAL_LOOKBACK_HOURS
+    since = now_utc - timedelta(hours=lookback_hours)
+
+    telegram = TelegramClient(
+        StringSession(os.environ["TG_SESSION_STRING"]),
+        int(os.environ["TG_API_ID"]),
+        os.environ["TG_API_HASH"],
+    )
     telegram.connect()
     try:
         posts = fetch_posts(telegram, channels, state, since)
@@ -385,15 +398,17 @@ def main() -> None:
         telegram.disconnect()
 
     kept, stats, suspicious = filter_local(posts)
-    ai_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"]) if os.getenv("GEMINI_API_KEY") else None
+    ai_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     ad_ids, _ = review_ads(ai_client, suspicious)
     if ad_ids:
         kept = [p for p in kept if p.id not in ad_ids]
         stats.ads += len(ad_ids)
+
     semantic_ids, _ = semantic_deduplicate(ai_client, kept)
     if semantic_ids:
         kept = [p for p in kept if p.id not in semantic_ids]
         stats.semantic_duplicates = len(semantic_ids)
+
     kept, memory_dropped = filter_memory(kept, state["delivered_news"])
     stats.original_posts = len(kept)
 
