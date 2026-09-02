@@ -9,19 +9,22 @@ from google import genai
 from google.genai import types
 from google.genai.errors import APIError
 
-# Models confirmed available in the user's Gemini API project.
+# For this workload (ad filtering + duplicate detection), Flash-Lite is the
+# sensible primary model: fast, inexpensive and designed for high-throughput.
+# The order also reflects the free-tier quotas visible in the user's AI Studio.
 DEFAULT_MODELS = (
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
 )
 
-# 404 is included because a model can be unavailable for a particular account.
+# 404 can mean that a model is unavailable for the current account/project.
 RETRYABLE_API_CODES = {404, 429, 500, 502, 503, 504}
 
-# A single Gemini request must never be allowed to hang until GitHub Actions
-# kills the whole job. The SDK timeout is in milliseconds.
+# A Gemini request must never be allowed to hang until GitHub Actions kills
+# the whole job. The SDK timeout is in milliseconds.
 REQUEST_TIMEOUT_MS = 45_000
 MAX_ATTEMPTS_PER_MODEL = 2
 RETRY_DELAY_SECONDS = 2
@@ -41,7 +44,7 @@ def model_queue() -> list[str]:
 
 
 def create_client(api_key: str) -> genai.Client:
-    """Create a Gemini client with a hard HTTP timeout and no SDK retries."""
+    """Create a Gemini client with a hard timeout and no SDK retries."""
     return genai.Client(
         api_key=api_key,
         http_options=types.HttpOptions(
@@ -60,12 +63,7 @@ def generate_json(
     prompt: str,
     parse: Callable[[str], dict],
 ) -> dict:
-    """Call Gemini with bounded retries and model fallback.
-
-    Retryable service/network failures never escape until every configured
-    model has been tried. Non-transient API errors fail immediately because
-    retrying them would only waste the free-tier quota.
-    """
+    """Call Gemini with bounded retries and model fallback."""
     last_error: BaseException | None = None
 
     for model in model_queue():
