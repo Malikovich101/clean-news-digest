@@ -13,7 +13,7 @@ from google import genai
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 
-from gemini_client import create_client, generate_json
+from gemini_client import create_client, generate_json, GeminiUnavailable
 
 UTC = timezone.utc
 PERM_TIMEZONE = timezone(timedelta(hours=5))
@@ -58,6 +58,7 @@ class Stats:
     exact_duplicates: int = 0
     semantic_duplicates: int = 0
     original_posts: int = 0
+    gemini_checked: bool = True
 
 
 class StateStore:
@@ -344,8 +345,10 @@ def split_telegram(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
 def render_digest(
     posts: list[Post], stats: Stats, memory_dropped: int
 ) -> str:
+    gemini_note = "✅ Проверка Gemini выполнена." if stats.gemini_checked else "⚠️ Проверка Gemini НЕ выполнялась."
     lines = [
         "🗞 ЧИСТЫЙ ДАЙДЖЕСТ",
+        gemini_note,
         (
             f"📊 Исходных постов: {stats.source_posts}; "
             f"реклама: {stats.ads}; "
@@ -490,13 +493,19 @@ def main() -> None:
     print(f"[telegram] total text posts: {len(posts)}", flush=True)
 
     kept, stats = filter_local(posts)
-    ai_client = create_client(os.environ["GEMINI_API_KEY"])
+    gemini_available = True
     try:
-        ad_ids, semantic_ids, ai_calls = ai_filter_and_deduplicate(
-            ai_client, kept
-        )
-    finally:
-        ai_client.close()
+        ai_client = create_client(os.environ["GEMINI_API_KEY"])
+        try:
+            ad_ids, semantic_ids, ai_calls = ai_filter_and_deduplicate(
+                ai_client, kept
+            )
+        finally:
+            ai_client.close()
+    except (GeminiUnavailable, RuntimeError, Exception) as exc:
+        gemini_available = False
+        ad_ids, semantic_ids, ai_calls = set(), set(), 0
+        print(f"[ai] unavailable; sending without Gemini check: {type(exc).__name__}: {exc}", flush=True)
 
     kept = [
         p for p in kept
@@ -504,11 +513,12 @@ def main() -> None:
     ]
     stats.ads += len(ad_ids)
     stats.semantic_duplicates = len(semantic_ids)
+    stats.gemini_checked = gemini_available
     kept, memory_dropped = filter_memory(kept, state["delivered_news"])
     stats.original_posts = len(kept)
     print(
         f"[ai] combined_calls={ai_calls}; ads={len(ad_ids)}; "
-        f"semantic_duplicates={len(semantic_ids)}",
+        f"semantic_duplicates={len(semantic_ids)}; checked={gemini_available}",
         flush=True,
     )
 
