@@ -86,12 +86,6 @@ def is_explicit_ad(text: str) -> bool:
     value = normalize_space(text).lower()
     return any(marker in value for marker in AD_MARKERS)
 
-def is_suspicious_ad(text: str) -> bool:
-    value = normalize_space(text).lower()
-    if is_explicit_ad(value):
-        return False
-    return any(re.search(pattern, value) for pattern in PROMO_PATTERNS)
-
 def source_url(channel: str, message_id: int) -> str:
     return f"https://t.me/{channel.lstrip('@')}/{message_id}"
 
@@ -183,8 +177,6 @@ def parse_json_object(text: str) -> dict[str, Any]:
     return data
 
 def ai_filter_and_deduplicate(client: genai.Client, posts: list[Post]) -> tuple[set[str], set[str], int]:
-    if not posts:
-        return set(), set(), 0
     dropped_ads: set[str] = set()
     dropped_dupes: set[str] = set()
     calls = 0
@@ -192,10 +184,9 @@ def ai_filter_and_deduplicate(client: genai.Client, posts: list[Post]) -> tuple[
         payload = [{"id": p.id, "text": normalize_space(p.text)[:MAX_AI_POST_CHARS]} for p in batch]
         prompt = (
             "Обработай Telegram-публикации для чистого новостного дайджеста. "
-            "1) Рекламой считай публикацию, основная цель которой — продать или продвинуть товар, услугу, бренд, мероприятие, промокод или коммерческое предложение. При сомнении НЕ удаляй. "
-            "2) Найди только дубли об одном и том же конкретном событии. Не объединяй новые развития одной истории. При сомнении оставь обе. Для группы выбери наиболее полную публикацию. "
-            "Верни только JSON: {\"ads\":[\"id\"],\"groups\":[{\"keep\":\"id\",\"duplicates\":[\"id\"]}]}. "
-            "Не придумывай id и включай только id из входных данных.\n"
+            "Рекламой считай публикацию, основная цель которой — продать или продвинуть товар, услугу, бренд, мероприятие, промокод или коммерческое предложение. При сомнении НЕ удаляй. "
+            "Найди только дубли об одном и том же конкретном событии. Не объединяй новые развития одной истории. При сомнении оставь обе. Для группы выбери наиболее полную публикацию. "
+            "Верни только JSON формата {\"ads\":[\"id\"],\"groups\":[{\"keep\":\"id\",\"duplicates\":[\"id\"]}]}. Не придумывай id; используй только id из входных данных.\n"
             + json.dumps(payload, ensure_ascii=False)
         )
         result = generate_json(client, prompt, parse_json_object)
@@ -337,16 +328,12 @@ def main() -> None:
     kept, stats = filter_local(posts)
     ai_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     ad_ids, semantic_ids, ai_calls = ai_filter_and_deduplicate(ai_client, kept)
-    if ad_ids:
-        kept = [p for p in kept if p.id not in ad_ids]
-    if semantic_ids:
-        kept = [p for p in kept if p.id not in semantic_ids]
+    kept = [p for p in kept if p.id not in ad_ids and p.id not in semantic_ids]
     stats.ads += len(ad_ids)
     stats.semantic_duplicates = len(semantic_ids)
-
     kept, memory_dropped = filter_memory(kept, state["delivered_news"])
     stats.original_posts = len(kept)
-    print(f"[ai] combined_calls={ai_calls}", flush=True)
+    print(f"[ai] combined_calls={ai_calls}; ads={len(ad_ids)}; semantic_duplicates={len(semantic_ids)}", flush=True)
 
     telegram_send(render_digest(kept, stats, memory_dropped))
     state["completed_slots"][slot_key] = now_utc.isoformat()
