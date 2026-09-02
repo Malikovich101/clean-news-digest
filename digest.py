@@ -13,6 +13,8 @@ from google import genai
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 
+from gemini_client import generate_json
+
 UTC = timezone.utc
 PERM_TIMEZONE = timezone(timedelta(hours=5))
 TELEGRAM_LIMIT = 3900
@@ -133,10 +135,9 @@ def trim_memory(items: Iterable[dict[str, Any]], now: datetime) -> list[dict[str
     result.sort(key=lambda x: x["delivered_at"], reverse=True)
     return result[:500]
 
-def filter_local(posts: list[Post]) -> tuple[list[Post], Stats, list[Post]]:
+def filter_local(posts: list[Post]) -> tuple[list[Post], Stats]:
     stats = Stats(source_posts=len(posts))
-    kept, suspicious = [], []
-    seen = set()
+    kept, seen = [], set()
     for post in posts:
         text = normalize_space(post.text)
         if len(URL_RE.sub("", text)) < MIN_TEXT_LENGTH:
@@ -144,15 +145,13 @@ def filter_local(posts: list[Post]) -> tuple[list[Post], Stats, list[Post]]:
         if is_explicit_ad(text):
             stats.ads += 1
             continue
-        if is_suspicious_ad(text):
-            suspicious.append(post)
         key = normalized_duplicate_text(text)
         if key in seen:
             stats.exact_duplicates += 1
             continue
         seen.add(key)
         kept.append(post)
-    return kept, stats, suspicious
+    return kept, stats
 
 def make_batches(posts: list[Post]) -> list[list[Post]]:
     batches, current = [], []
@@ -183,44 +182,39 @@ def parse_json_object(text: str) -> dict[str, Any]:
         raise ValueError("Gemini returned non-object JSON")
     return data
 
-def gemini_json(client: genai.Client, prompt: str) -> dict[str, Any]:
-    response = client.models.generate_content(model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), contents=prompt, config={"response_mime_type": "application/json"})
-    return parse_json_object(response.text or "")
-
-def review_ads(client: genai.Client | None, posts: list[Post]) -> tuple[set[str], int]:
-    if client is None:
-        return set(), 0
-    dropped, calls = set(), 0
+def ai_filter_and_deduplicate(client: genai.Client, posts: list[Post]) -> tuple[set[str], set[str], int]:
+    if not posts:
+        return set(), set(), 0
+    dropped_ads: set[str] = set()
+    dropped_dupes: set[str] = set()
+    calls = 0
     for batch in make_batches(posts):
         payload = [{"id": p.id, "text": normalize_space(p.text)[:MAX_AI_POST_CHARS]} for p in batch]
-        prompt = ("Определи только рекламу в Telegram-публикациях. Рекламой считай публикацию, основная цель которой — продать или продвинуть товар, услугу, бренд, мероприятие, промокод или коммерческое предложение. При сомнении НЕ помечай как рекламу. Верни только JSON формата {\"ads\":[\"id\"]}.\n" + json.dumps(payload, ensure_ascii=False))
-        result = gemini_json(client, prompt); calls += 1
-        allowed = {p.id for p in batch}; ids = result.get("ads", [])
-        if isinstance(ids, list):
-            dropped.update(str(x) for x in ids if str(x) in allowed)
-    return dropped, calls
-
-def semantic_deduplicate(client: genai.Client | None, posts: list[Post]) -> tuple[set[str], int]:
-    if client is None or len(posts) < 2:
-        return set(), 0
-    dropped, calls = set(), 0
-    for batch in make_batches(posts):
-        if len(batch) < 2:
-            continue
-        payload = [{"id": p.id, "text": normalize_space(p.text)[:MAX_AI_POST_CHARS]} for p in batch]
-        prompt = ("Найди только смысловые дубли публикаций об одном и том же конкретном событии. Не объединяй новые развития одной истории. При сомнении оставь обе. Для каждой группы выбери наиболее полную публикацию. Верни только JSON формата {\"groups\":[{\"keep\":\"id\",\"duplicates\":[\"id\"]}]}.\n" + json.dumps(payload, ensure_ascii=False))
-        result = gemini_json(client, prompt); calls += 1
-        allowed = {p.id for p in batch}; groups = result.get("groups", [])
-        if not isinstance(groups, list):
-            continue
-        for group in groups:
-            if not isinstance(group, dict):
-                continue
-            keep = str(group.get("keep", "")); duplicates = group.get("duplicates", [])
-            if keep not in allowed or not isinstance(duplicates, list):
-                continue
-            dropped.update(str(x) for x in duplicates if str(x) in allowed and str(x) != keep)
-    return dropped, calls
+        prompt = (
+            "Обработай Telegram-публикации для чистого новостного дайджеста. "
+            "1) Рекламой считай публикацию, основная цель которой — продать или продвинуть товар, услугу, бренд, мероприятие, промокод или коммерческое предложение. При сомнении НЕ удаляй. "
+            "2) Найди только дубли об одном и том же конкретном событии. Не объединяй новые развития одной истории. При сомнении оставь обе. Для группы выбери наиболее полную публикацию. "
+            "Верни только JSON: {\"ads\":[\"id\"],\"groups\":[{\"keep\":\"id\",\"duplicates\":[\"id\"]}]}. "
+            "Не придумывай id и включай только id из входных данных.\n"
+            + json.dumps(payload, ensure_ascii=False)
+        )
+        result = generate_json(client, prompt, parse_json_object)
+        calls += 1
+        allowed = {p.id for p in batch}
+        ads = result.get("ads", [])
+        if isinstance(ads, list):
+            dropped_ads.update(str(x) for x in ads if str(x) in allowed)
+        groups = result.get("groups", [])
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                keep = str(group.get("keep", ""))
+                duplicates = group.get("duplicates", [])
+                if keep not in allowed or not isinstance(duplicates, list):
+                    continue
+                dropped_dupes.update(str(x) for x in duplicates if str(x) in allowed and str(x) != keep)
+    return dropped_ads, dropped_dupes, calls
 
 def filter_memory(posts: list[Post], memory: list[dict[str, Any]]) -> tuple[list[Post], int]:
     known = {normalized_duplicate_text(str(item["text"])) for item in memory if item.get("text")}
@@ -240,23 +234,26 @@ def split_telegram(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
             cut = text.rfind("\n", 0, limit)
         if cut < limit // 2:
             cut = limit
-        chunks.append(text[:cut].rstrip()); text = text[cut:].lstrip()
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
     if text:
         chunks.append(text)
     return chunks
 
 def render_digest(posts: list[Post], stats: Stats, memory_dropped: int) -> str:
-    lines = ["🗞 ЧИСТЫЙ ДАЙДЖЕСТ", f"📊 Исходных постов: {stats.source_posts}; реклама: {stats.ads}; точные повторы: {stats.exact_duplicates}; смысловые повторы: {stats.semantic_duplicates}; повторы за 3 дня: {memory_dropped}; уникальных новостей: {len(posts)}", "Каждый текст ниже — исходная публикация канала без пересказа и сокращения."]
+    lines = [
+        "🗞 ЧИСТЫЙ ДАЙДЖЕСТ",
+        f"📊 Исходных постов: {stats.source_posts}; реклама: {stats.ads}; точные повторы: {stats.exact_duplicates}; смысловые повторы: {stats.semantic_duplicates}; повторы за 3 дня: {memory_dropped}; уникальных новостей: {len(posts)}",
+        "Каждый текст ниже — исходная публикация канала без пересказа и сокращения.",
+    ]
     lines.extend(format_post(p) for p in sorted(posts, key=lambda x: x.date))
     return "\n".join(lines).strip()
 
 def require_env() -> None:
-    required = ("TG_API_ID", "TG_API_HASH", "TG_SESSION_STRING", "TG_BOT_TOKEN", "TG_CHAT_ID")
+    required = ("TG_API_ID", "TG_API_HASH", "TG_SESSION_STRING", "TG_BOT_TOKEN", "TG_CHAT_ID", "GEMINI_API_KEY")
     missing = [key for key in required if not os.getenv(key)]
     if missing:
         raise RuntimeError("Не заданы обязательные secrets: " + ", ".join(missing))
-    if not os.getenv("GEMINI_API_KEY"):
-        raise RuntimeError("Не задан обязательный secret: GEMINI_API_KEY")
 
 def load_channels(path: str = "channels.txt") -> list[str]:
     lines = Path(path).read_text(encoding="utf-8").splitlines()
@@ -266,9 +263,14 @@ def load_channels(path: str = "channels.txt") -> list[str]:
     return channels
 
 def telegram_send(text: str) -> None:
-    token = os.environ["TG_BOT_TOKEN"]; chat_id = os.environ["TG_CHAT_ID"]
+    token = os.environ["TG_BOT_TOKEN"]
+    chat_id = os.environ["TG_CHAT_ID"]
     for chunk in split_telegram(text):
-        response = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}, timeout=30)
+        response = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True},
+            timeout=30,
+        )
         response.raise_for_status()
         if not response.json().get("ok"):
             raise RuntimeError("Telegram Bot API rejected message")
@@ -298,38 +300,60 @@ def fetch_posts(client: TelegramClient, channels: list[str], state: dict[str, An
 
 def main() -> None:
     require_env()
-    now_utc = datetime.now(UTC); now_local = now_utc.astimezone(PERM_TIMEZONE)
-    store = StateStore(); state = store.load(); state["delivered_news"] = trim_memory(state.get("delivered_news", []), now_utc)
+    now_utc = datetime.now(UTC)
+    now_local = now_utc.astimezone(PERM_TIMEZONE)
+    store = StateStore()
+    state = store.load()
+    state["delivered_news"] = trim_memory(state.get("delivered_news", []), now_utc)
     pending = next_pending_slot(now_local, state["completed_slots"])
     if pending is None:
-        print("Нет незавершённого ожидаемого слота."); return
+        print("Нет незавершённого ожидаемого слота.")
+        return
     slot_name, slot_key = pending
-    channels = load_channels(); has_watermarks = bool(state.get("watermarks"))
+    channels = load_channels()
+    has_watermarks = bool(state.get("watermarks"))
     lookback_hours = RECOVERY_LOOKBACK_HOURS if has_watermarks else INITIAL_LOOKBACK_HOURS
     since = now_utc - timedelta(hours=lookback_hours)
     print(f"[slot] {slot_name} {slot_key}; lookback={lookback_hours}h", flush=True)
-    telegram = TelegramClient(StringSession(os.environ["TG_SESSION_STRING"]), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"], timeout=30, request_retries=1, connection_retries=1, retry_delay=1, auto_reconnect=False, flood_sleep_threshold=0)
+
+    telegram = TelegramClient(
+        StringSession(os.environ["TG_SESSION_STRING"]),
+        int(os.environ["TG_API_ID"]),
+        os.environ["TG_API_HASH"],
+        timeout=30,
+        request_retries=1,
+        connection_retries=1,
+        retry_delay=1,
+        auto_reconnect=False,
+        flood_sleep_threshold=0,
+    )
     telegram.connect()
     try:
         posts = fetch_posts(telegram, channels, state, since)
     finally:
         telegram.disconnect()
     print(f"[telegram] total text posts: {len(posts)}", flush=True)
-    kept, stats, suspicious = filter_local(posts)
+
+    kept, stats = filter_local(posts)
     ai_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    ad_ids, ad_calls = review_ads(ai_client, suspicious)
+    ad_ids, semantic_ids, ai_calls = ai_filter_and_deduplicate(ai_client, kept)
     if ad_ids:
-        kept = [p for p in kept if p.id not in ad_ids]; stats.ads += len(ad_ids)
-    semantic_ids, semantic_calls = semantic_deduplicate(ai_client, kept)
+        kept = [p for p in kept if p.id not in ad_ids]
     if semantic_ids:
-        kept = [p for p in kept if p.id not in semantic_ids]; stats.semantic_duplicates = len(semantic_ids)
-    kept, memory_dropped = filter_memory(kept, state["delivered_news"]); stats.original_posts = len(kept)
-    print(f"[ai] ad_calls={ad_calls} semantic_calls={semantic_calls}", flush=True)
+        kept = [p for p in kept if p.id not in semantic_ids]
+    stats.ads += len(ad_ids)
+    stats.semantic_duplicates = len(semantic_ids)
+
+    kept, memory_dropped = filter_memory(kept, state["delivered_news"])
+    stats.original_posts = len(kept)
+    print(f"[ai] combined_calls={ai_calls}", flush=True)
+
     telegram_send(render_digest(kept, stats, memory_dropped))
     state["completed_slots"][slot_key] = now_utc.isoformat()
     state["delivered_news"].extend({"id": p.id, "text": p.text, "delivered_at": now_utc.isoformat()} for p in kept)
     state["delivered_news"] = trim_memory(state["delivered_news"], now_utc)
-    state["last_successful_run"] = now_utc.isoformat(); store.save(state)
+    state["last_successful_run"] = now_utc.isoformat()
+    store.save(state)
     print(f"Слот {slot_name} завершён: {len(kept)} новостей.", flush=True)
 
 if __name__ == "__main__":
