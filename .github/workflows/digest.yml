@@ -7,6 +7,10 @@ on:
     - cron: '5 15 * * *'
   workflow_dispatch:
 
+concurrency:
+  group: clean-news-digest
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -20,6 +24,26 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Patch Telegram history scan
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('digest.py')
+          s = p.read_text(encoding='utf-8')
+          old = 'for message in client.iter_messages(entity, min_id=watermark, reverse=True):'
+          s = s.replace(old, 'for message in client.iter_messages(entity, min_id=watermark):')
+          old = '            if date < since:\n                continue\n'
+          s = s.replace(old, '            if date < since:\n                break\n')
+          old = '    telegram = TelegramClient(\n        StringSession(os.environ["TG_SESSION_STRING"]),\n        int(os.environ["TG_API_ID"]),\n        os.environ["TG_API_HASH"],\n    )'
+          new = '    telegram = TelegramClient(\n        StringSession(os.environ["TG_SESSION_STRING"]),\n        int(os.environ["TG_API_ID"]),\n        os.environ["TG_API_HASH"],\n        timeout=30,\n        request_retries=1,\n        connection_retries=1,\n        retry_delay=1,\n        auto_reconnect=False,\n        flood_sleep_threshold=0,\n    )'
+          s = s.replace(old, new)
+          p.write_text(s, encoding='utf-8')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add digest.py
+          git diff --cached --quiet || git commit -m 'Fix Telegram history scan and retries'
+          git push
       - name: Run digest
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
@@ -29,8 +53,9 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: gemini-2.5-flash
-        run: python digest.py
+        run: python -u digest.py
       - name: Commit state
+        if: success()
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
