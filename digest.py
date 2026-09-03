@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import html
 import logging
 import asyncio
 import difflib
@@ -36,14 +37,14 @@ AD_REGEXES = [
 ]
 
 def is_ad_or_junk(text: str) -> bool:
-    """Отсеивает рекламу, спам, инвайт-заглушки и слишком короткие технические посты."""
+    """Отсеивает рекламу, спам, инвайт-заглушки и технические однострочники."""
     clean_text = text.strip()
     
-    # 1. Отсев слишком коротких постов (заглушки, стикеры, реакции, однострочники)
+    # 1. Отсев слишком коротких постов (стикеры, реакции, однострочные заглушки)
     if len(clean_text) < 45:
         return True
 
-    # 2. Отсев скрытой рекламы и инвайт-ссылок (t.me/+ или t.me/joinchat) без полезного текста
+    # 2. Отсев инвайт-ссылок (t.me/+ или t.me/joinchat) без полезного объема текста
     if ("t.me/+" in clean_text or "t.me/joinchat/" in clean_text) and len(clean_text) < 250:
         return True
 
@@ -54,14 +55,32 @@ def is_ad_or_junk(text: str) -> bool:
 
     return False
 
+# Алиас для обеспечения обратной совместимости с тестами
+is_ad = is_ad_or_junk
+
 def send_telegram_messages(bot_token: str, chat_id: str, messages: List[str]):
-    """Отправляет готовые сгруппированные сообщения в Telegram с небольшой паузой между ними."""
+    """Отправляет сгруппированные сообщения в Telegram с нарезкой при превышении лимита."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     
+    # Страховочная нарезка на случай сверхдлинных лонгридов
+    safe_chunks = []
     for msg in messages:
+        while len(msg) > 4000:
+            split_idx = msg.rfind("\n\n", 0, 4000)
+            if split_idx == -1:
+                split_idx = msg.rfind("\n", 0, 4000)
+            if split_idx == -1:
+                split_idx = 4000
+            safe_chunks.append(msg[:split_idx])
+            msg = msg[split_idx:].lstrip()
+        safe_chunks.append(msg)
+
+    for chunk in safe_chunks:
+        if not chunk.strip():
+            continue
         resp = requests.post(url, json={
             "chat_id": chat_id,
-            "text": msg,
+            "text": chunk,
             "parse_mode": "HTML",
             "disable_web_page_preview": True
         }, timeout=20)
@@ -72,7 +91,8 @@ def alert_failure(bot_token: str, chat_id: str, error_msg: str):
     """Самопроверка: отправка сообщения об ошибке владельцу."""
     if bot_token and chat_id:
         try:
-            msg = f"🚨 <b>Сбой в работе 'Чистого дайджеста'</b>\n\nПроцесс завершился с ошибкой:\n<code>{error_msg}</code>"
+            safe_err = html.escape(str(error_msg)[:500])
+            msg = f"🚨 <b>Сбой в работе 'Чистого дайджеста'</b>\n\nПроцесс завершился с ошибкой:\n<code>{safe_err}</code>"
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
             requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
         except Exception as e:
@@ -172,31 +192,19 @@ def prune_3d_memory(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
     return valid_records
 
-def build_grouped_messages(stats_header: str, posts: List[Dict[str, Any]], max_chars: int = 3800) -> List[str]:
-    """
-    Группирует новости по 4-10 штук в одно сообщение Telegram (до лимита длины).
-    Форматирует каждую новость:
-    🕒 DD.MM HH:MM · @username
-    Текст новости
-    Источник: https://t.me/...
-    """
+def build_grouped_messages(stats_header: str, posts: List[Dict[str, Any]], max_chars: int = 3500) -> List[str]:
+    """Группирует новости по 4-10 штук в одно сообщение Telegram."""
     separator = "\n\n────────────────────\n\n"
     messages = []
     current_message = stats_header
 
     for p in posts:
-        # Дата и время по Перми (UTC+5)
         post_date = p["date"].astimezone(PERM_TZ)
         date_str = post_date.strftime("%d.%m %H:%M")
-        channel_tag = f"@{p['username']}" if p.get("username") else p["channel"]
+        raw_tag = f"@{p['username']}" if p.get("username") else p["channel"]
+        channel_tag = html.escape(raw_tag)
 
-        escaped_text = (
-            p["text"]
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-
+        escaped_text = html.escape(p["text"])
         post_block = (
             f"🕒 {date_str} · {channel_tag}\n"
             f"{escaped_text}\n\n"
@@ -242,7 +250,7 @@ async def main():
         logger.info("Новых постов нет. Завершение работы.")
         return
 
-    # Фильтр рекламы и мусора
+    # Фильтр рекламы и спама
     clean_from_ads = []
     ads_count = 0
     for post in raw_posts:
@@ -251,10 +259,10 @@ async def main():
         else:
             clean_from_ads.append(post)
 
-    # Фильтр точных дублей
+    # Фильтр точных копий
     after_exact, exact_dupes_count = filter_exact_and_near_duplicates(clean_from_ads)
 
-    # Фильтр смысловых повторов и проверка 3-дневной памяти
+    # Фильтр смысловых повторов и сверка с 3-дневной памятью
     active_history = prune_3d_memory(state.get("history_3d", []))
     past_topics = [h["topic"] for h in active_history]
 
@@ -265,11 +273,11 @@ async def main():
     filtered_past_count = semantic_result["filtered_past_count"]
     filtered_semantic_count = semantic_result["filtered_semantic_count"]
 
-    # Итоговые посты в хронологическом порядке (от старых к новым)
+    # Формирование итогового пула постов (от старых к новым)
     final_posts = [p for p in after_exact if p["id"] in selected_ids]
     final_posts.sort(key=lambda p: p["date"])
 
-    # Обновление состояния и памяти за 3 дня
+    # Обновление состояния и памяти
     now_iso = datetime.now(timezone.utc).isoformat()
     for topic in semantic_result["new_topics"]:
         active_history.append({"date": now_iso, "topic": topic})
@@ -290,7 +298,7 @@ async def main():
         f"• <b>Осталось уникальных новостей: {len(final_posts)}</b>"
     )
 
-    # Формирование сгруппированных сообщений (по 4-10 новостей в сообщении)
+    # Сборка и отправка сообщений
     messages_to_send = build_grouped_messages(stats_header, final_posts)
     send_telegram_messages(bot_token, chat_id, messages_to_send)
     logger.info("Дайджест успешно отправлен.")
