@@ -1,75 +1,27 @@
-import sys
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from digest import is_ad, filter_exact_and_near_duplicates, prune_3d_memory
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+def test_ad_detection():
+    assert is_ad("Скидка 50% по промокоду: SALE2024 только сегодня!") is True
+    assert is_ad("Компания объявляет набор. Реклама. ИНН 7701234567") is True
+    assert is_ad("Законопроект принят в третьем чтении erid: 2VtzquvP4") is True
+    assert is_ad("Обычная политическая новость без каких-либо интеграций.") is False
 
-from digest import (
-    INITIAL_LOOKBACK_HOURS,
-    RECOVERY_LOOKBACK_HOURS,
-    Post,
-    StateStore,
-    filter_local,
-    next_pending_slot,
-    normalized_duplicate_text,
-    split_telegram,
-    trim_memory,
-)
-
-
-def test_normalized_duplicate_text_removes_urls_and_markup():
-    a = "Новости: тест! https://example.com #tag"
-    b = "Новости тест"
-    assert normalized_duplicate_text(a) == normalized_duplicate_text(b)
-
-
-def test_filter_local_removes_explicit_and_exact_duplicates():
+def test_exact_and_near_duplicates():
     posts = [
-        Post("a:1", "@a", "2026-09-02T05:00:00+00:00", "Одна важная новость сегодня", "https://t.me/a/1"),
-        Post("b:2", "@b", "2026-09-02T05:01:00+00:00", "Одна важная новость сегодня!!!", "https://t.me/b/2"),
-        Post("a:3", "@a", "2026-09-02T05:02:00+00:00", "#реклама Купите курс прямо сейчас", "https://t.me/a/3"),
+        {"id": "1", "text": "Центральный банк повысил ключевую ставку до 21% годовых."},
+        {"id": "2", "text": "Центральный банк повысил ключевую ставку до 21% годовых."},
+        {"id": "3", "text": "В Москве открылась новая станция метро."},
     ]
-    kept, stats = filter_local(posts)
-    assert len(kept) == 1
-    assert stats.exact_duplicates == 1
-    assert stats.ads == 1
+    unique, dupes_count = filter_exact_and_near_duplicates(posts)
+    assert len(unique) == 2
+    assert dupes_count == 1
 
-
-def test_pending_slots_returns_earliest_uncompleted():
-    tz = timezone(timedelta(hours=5))
-    now = datetime(2026, 9, 2, 16, 0, tzinfo=tz)
-    pending = next_pending_slot(now, {})
-    assert pending == ("morning", "2026-09-02:morning")
-
-
-def test_trim_memory_keeps_only_last_72_hours():
-    now = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
-    items = [
-        {"id": "new", "text": "new", "delivered_at": (now - timedelta(hours=2)).isoformat()},
-        {"id": "old", "text": "old", "delivered_at": (now - timedelta(hours=80)).isoformat()},
-    ]
-    result = trim_memory(items, now)
-    assert [x["id"] for x in result] == ["new"]
-
-
-def test_split_telegram_respects_limit():
-    text = "x" * 8000
-    chunks = split_telegram(text, 3900)
-    assert len(chunks) == 3
-    assert all(len(chunk) <= 3900 for chunk in chunks)
-
-
-def test_state_store_default_is_minimal(tmp_path):
-    state = StateStore(str(tmp_path / "state.json")).load()
-    assert state == {
-        "version": 1,
-        "watermarks": {},
-        "completed_slots": {},
-        "delivered_news": [],
-    }
-
-
-def test_first_run_lookback_is_shorter_than_recovery_lookback():
-    assert INITIAL_LOOKBACK_HOURS == 6
-    assert RECOVERY_LOOKBACK_HOURS == 9
-    assert INITIAL_LOOKBACK_HOURS < RECOVERY_LOOKBACK_HOURS
+def test_prune_3d_memory():
+    now = datetime.now(timezone.utc)
+    old_record = {"date": (now - timedelta(days=4)).isoformat(), "topic": "Старая новость"}
+    fresh_record = {"date": (now - timedelta(days=1)).isoformat(), "topic": "Свежая новость"}
+    
+    pruned = prune_3d_memory([old_record, fresh_record])
+    assert len(pruned) == 1
+    assert pruned[0]["topic"] == "Свежая новость"
