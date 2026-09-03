@@ -1,4 +1,27 @@
 {
-  "channels": {},
+  "channels": {
+    "@economica": 27879,
+    "@media1337": 28130,
+    "@technomotel": 22818,
+    "@whackdoor": 31077,
+    "@technoinsider": 3295,
+    "@banki_oil": 52863,
+    "@TrendWatching24": 27975,
+    "@killerfeat": 18916,
+    "@neyroseti_dr": 3965,
+    "@rozetkedplus": 32814,
+    "@anton_hardin_official": 36770,
+    "@vcnews": 63321,
+    "@doktorgpt": 2688,
+    "@bazabazon": 48826,
+    "@rozetked": 27320,
+    "@aiaiai": 22068,
+    "@biggeekru": 39408,
+    "@bugfeature": 8855,
+    "@trends": 27254,
+    "@intrendo": 27254,
+    "@exploitex": 36337,
+    "@bugnotfeature": 27515
+  },
   "history_3d": []
 }
