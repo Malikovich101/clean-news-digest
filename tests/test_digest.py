@@ -1,17 +1,20 @@
 from datetime import datetime, timezone, timedelta
-from digest import is_ad, filter_exact_and_near_duplicates, prune_3d_memory
+from digest import is_ad_or_junk, is_ad, filter_exact_and_near_duplicates, prune_3d_memory
 
-def test_ad_detection():
-    assert is_ad("Скидка 50% по промокоду: SALE2024 только сегодня!") is True
-    assert is_ad("Компания объявляет набор. Реклама. ИНН 7701234567") is True
-    assert is_ad("Законопроект принят в третьем чтении erid: 2VtzquvP4") is True
-    assert is_ad("Обычная политическая новость без каких-либо интеграций.") is False
+def test_ad_and_junk_detection():
+    assert is_ad_or_junk("Скидка 50% по промокоду: SALE2026 только сегодня для всех подписчиков!") is True
+    assert is_ad_or_junk("Компания открывает новый филиал. Реклама. ИНН 7701234567") is True
+    assert is_ad_or_junk("Законопроект принят в третьем чтении erid: 2VtzquvP4") is True
+    assert is_ad_or_junk("Короткий пост") is True
+    assert is_ad_or_junk("Заходи в наш канал: https://t.me/+q6SAUXqW4fYzMzhi") is True
+    assert is_ad_or_junk("Мировые сборы нового фильма превысили 110 миллионов долларов за первый уикенд проката.") is False
+    assert is_ad("Мировые сборы нового фильма превысили 110 миллионов долларов за первый уикенд проката.") is False
 
 def test_exact_and_near_duplicates():
     posts = [
-        {"id": "1", "text": "Центральный банк повысил ключевую ставку до 21% годовых."},
-        {"id": "2", "text": "Центральный банк повысил ключевую ставку до 21% годовых."},
-        {"id": "3", "text": "В Москве открылась новая станция метро."},
+        {"id": "1", "text": "Центральный банк повысил ключевую ставку до 21% годовых на заседании."},
+        {"id": "2", "text": "Центральный банк повысил ключевую ставку до 21% годовых на заседании."},
+        {"id": "3", "text": "В Москве открылась новая станция метро в северном округе столицы."},
     ]
     unique, dupes_count = filter_exact_and_near_duplicates(posts)
     assert len(unique) == 2
