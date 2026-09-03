@@ -1,97 +1,100 @@
-from __future__ import annotations
-
-import os
-import time
-from collections.abc import Callable
-
-import httpx
+import json
+import logging
+from typing import List, Dict, Any
 from google import genai
 from google.genai import types
-from google.genai.errors import APIError
 
-# For this workload (ad filtering + duplicate detection), Flash-Lite is the
-# sensible primary model: fast, inexpensive and designed for high-throughput.
-# The order also reflects the free-tier quotas visible in the user's AI Studio.
-DEFAULT_MODELS = (
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-)
+logger = logging.getLogger(__name__)
 
-# 404 can mean that a model is unavailable for the current account/project.
-RETRYABLE_API_CODES = {404, 429, 500, 502, 503, 504}
+class SemanticDeduplicator:
+    def __init__(self, api_key: str):
+        self.client = genai.Client(api_key=api_key)
+        self.model = "gemini-2.5-flash"
 
-# One request has a hard 30-second network deadline. We do not retry the same
-# model: the next model is the retry. This keeps the whole digest bounded and
-# avoids burning free-tier quota on repeated calls to a failing model.
-REQUEST_TIMEOUT_MS = 30_000
-RETRY_DELAY_SECONDS = 1
+    def select_unique_and_best_posts(
+        self, 
+        candidates: List[Dict[str, Any]], 
+        past_topics_3d: List[str]
+    ) -> Dict[str, Any]:
+        """
+        ИИ выступает исключительно арбитром:
+        1. Исключает новости, сюжет которых уже был в past_topics_3d.
+        2. Группирует смысловые дубликаты текущей выборки.
+        3. Выбирает ID самой полной и информативной оригинальной версии.
+        4. Не генерирует и не сокращает текст новости.
+        """
+        if not candidates:
+            return {"selected_ids": [], "new_topics": [], "filtered_past_count": 0, "filtered_semantic_count": 0}
 
+        # Минимизируем передаваемые данные (id + текст)
+        items_payload = [
+            {"id": item["id"], "text": item["text"][:1500]}
+            for item in candidates
+        ]
 
-class GeminiUnavailable(RuntimeError):
-    pass
+        system_instruction = (
+            "Ты — строгий редактор-арбитр новостей. Твоя задача — анализировать списки постов.\n"
+            "ПРАВИЛА:\n"
+            "1. НИКОГДА не переписывай, не сокращай и не сочиняй новости.\n"
+            "2. Сверь посты со списком 'УЖЕ ОСВЕЩЕННЫЕ ТЕМЫ ЗА 3 ДНЯ'. Если пост описывает то же самое событие — отбрось его.\n"
+            "3. Оставшиеся посты сгруппируй по смысловым событиям.\n"
+            "4. В каждой группе выбери ровно ОДИН пост (самый полный, информативный, с фактами).\n"
+            "5. Для каждого выбранного поста сформулируй краткую суть события (до 10 слов) для пополнения памяти.\n"
+            "6. Верни строго валидный JSON."
+        )
 
+        prompt = {
+            "recent_3d_topics": past_topics_3d,
+            "incoming_posts": items_payload
+        }
 
-def model_queue() -> list[str]:
-    configured = os.getenv("GEMINI_MODEL", "").strip()
-    result: list[str] = []
-    for model in (configured, *DEFAULT_MODELS):
-        if model and model not in result:
-            result.append(model)
-    return result
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "rejected_as_3d_dupes_count": {"type": "INTEGER"},
+                "semantic_groups_merged_count": {"type": "INTEGER"},
+                "results": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "selected_post_id": {"type": "STRING"},
+                            "topic_summary": {"type": "STRING"}
+                        },
+                        "required": ["selected_post_id", "topic_summary"]
+                    }
+                }
+            },
+            "required": ["rejected_as_3d_dupes_count", "semantic_groups_merged_count", "results"]
+        }
 
-
-def create_client(api_key: str) -> genai.Client:
-    """Create a Gemini client with a hard timeout and no SDK retries."""
-    return genai.Client(
-        api_key=api_key,
-        http_options=types.HttpOptions(
-            timeout=REQUEST_TIMEOUT_MS,
-            retry_options=types.HttpRetryOptions(attempts=1),
-        ),
-    )
-
-
-def generate_json(
-    client: genai.Client,
-    prompt: str,
-    parse: Callable[[str], dict],
-) -> dict:
-    """Call Gemini with bounded model fallback."""
-    last_error: BaseException | None = None
-
-    for index, model in enumerate(model_queue()):
         try:
-            print(f"[ai] model={model} attempt=1", flush=True)
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config={"response_mime_type": "application/json"},
-            )
-            result = parse(response.text or "")
-            print(f"[ai] model={model} success", flush=True)
-            return result
-        except APIError as exc:
-            last_error = exc
-            code = getattr(exc, "code", "unknown")
-            if code not in RETRYABLE_API_CODES:
-                raise
-            if index < len(model_queue()) - 1:
-                print(f"[ai] model={model} error={code}; fallback", flush=True)
-                time.sleep(RETRY_DELAY_SECONDS)
-        except httpx.HTTPError as exc:
-            # Includes RemoteProtocolError, ConnectError, ConnectTimeout,
-            # ReadTimeout, WriteError and PoolTimeout.
-            last_error = exc
-            if index < len(model_queue()) - 1:
-                print(
-                    f"[ai] model={model} network={type(exc).__name__}; fallback",
-                    flush=True,
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=json.dumps(prompt, ensure_ascii=False),
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=0.1
                 )
-                time.sleep(RETRY_DELAY_SECONDS)
-
-    raise GeminiUnavailable(
-        f"All Gemini models unavailable; last error: {last_error}"
-    ) from last_error
+            )
+            data = json.loads(response.text)
+            selected_ids = [item["selected_post_id"] for item in data.get("results", [])]
+            new_topics = [item["topic_summary"] for item in data.get("results", [])]
+            
+            return {
+                "selected_ids": selected_ids,
+                "new_topics": new_topics,
+                "filtered_past_count": data.get("rejected_as_3d_dupes_count", 0),
+                "filtered_semantic_count": data.get("semantic_groups_merged_count", 0)
+            }
+        except Exception as e:
+            logger.error(f"Ошибка вызова Gemini API: {e}")
+            # Fallback: при отказе API возвращаем исходные посты без смысловой дедупликации
+            return {
+                "selected_ids": [c["id"] for c in candidates],
+                "new_topics": [],
+                "filtered_past_count": 0,
+                "filtered_semantic_count": 0
+            }
