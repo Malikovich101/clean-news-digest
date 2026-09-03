@@ -175,7 +175,7 @@ def prune_3d_memory(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def build_grouped_messages(stats_header: str, posts: List[Dict[str, Any]], max_chars: int = 3800) -> List[str]:
     """
     Группирует новости по 4-10 штук в одно сообщение Telegram (до лимита длины).
-    Форматирует каждую новость в точности по скриншоту:
+    Форматирует каждую новость:
     🕒 DD.MM HH:MM · @username
     Текст новости
     Источник: https://t.me/...
@@ -280,6 +280,7 @@ async def main():
 
     # Статистика воронки
     stats_header = (
+        "❗️❗️❗️❗️❗️❗️❗️❗️\n"
         "📊 <b>Сводка обработки новостей</b>\n"
         f"• Всего постов собрано: <b>{total_collected}</b>\n"
         f"• Отсеяно рекламы и спама: <b>{ads_count}</b>\n"
