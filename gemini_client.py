@@ -18,15 +18,19 @@ class SemanticDeduplicator:
     ) -> Dict[str, Any]:
         """
         ИИ выступает исключительно арбитром:
-        1. Исключает новости, сюжет которых уже был в past_topics_3d.
-        2. Группирует смысловые дубликаты текущей выборки.
-        3. Выбирает ID самой полной и информативной оригинальной версии.
-        4. Не генерирует и не сокращает текст новости.
+        1. Исключает сюжеты, уже встречавшиеся за 3 дня.
+        2. Группирует смысловые дубликаты.
+        3. Выбирает ID самой полной оригинальной версии.
         """
         if not candidates:
-            return {"selected_ids": [], "new_topics": [], "filtered_past_count": 0, "filtered_semantic_count": 0}
+            return {
+                "selected_ids": [],
+                "new_topics": [],
+                "filtered_past_count": 0,
+                "filtered_semantic_count": 0,
+                "gemini_ok": True
+            }
 
-        # Минимизируем передаваемые данные (id + текст)
         items_payload = [
             {"id": item["id"], "text": item["text"][:1500]}
             for item in candidates
@@ -87,14 +91,16 @@ class SemanticDeduplicator:
                 "selected_ids": selected_ids,
                 "new_topics": new_topics,
                 "filtered_past_count": data.get("rejected_as_3d_dupes_count", 0),
-                "filtered_semantic_count": data.get("semantic_groups_merged_count", 0)
+                "filtered_semantic_count": data.get("semantic_groups_merged_count", 0),
+                "gemini_ok": True
             }
         except Exception as e:
             logger.error(f"Ошибка вызова Gemini API: {e}")
-            # Fallback: при отказе API возвращаем исходные посты без смысловой дедупликации
+            # Fallback: при сбое возвращаем посты без смыслового объединения
             return {
                 "selected_ids": [c["id"] for c in candidates],
                 "new_topics": [],
                 "filtered_past_count": 0,
-                "filtered_semantic_count": 0
+                "filtered_semantic_count": 0,
+                "gemini_ok": False
             }
