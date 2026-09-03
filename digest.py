@@ -37,32 +37,20 @@ AD_REGEXES = [
 ]
 
 def is_ad_or_junk(text: str) -> bool:
-    """Отсеивает рекламу, спам, инвайт-заглушки и технические однострочники."""
     clean_text = text.strip()
-    
-    # 1. Отсев слишком коротких постов (стикеры, реакции, однострочные заглушки)
     if len(clean_text) < 45:
         return True
-
-    # 2. Отсев инвайт-ссылок (t.me/+ или t.me/joinchat) без полезного объема текста
     if ("t.me/+" in clean_text or "t.me/joinchat/" in clean_text) and len(clean_text) < 250:
         return True
-
-    # 3. Маркеры рекламы
     for pattern in AD_REGEXES:
         if pattern.search(clean_text):
             return True
-
     return False
 
-# Алиас для обеспечения обратной совместимости с тестами
 is_ad = is_ad_or_junk
 
 def send_telegram_messages(bot_token: str, chat_id: str, messages: List[str]):
-    """Отправляет сгруппированные сообщения в Telegram с нарезкой при превышении лимита."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    
-    # Страховочная нарезка на случай сверхдлинных лонгридов
     safe_chunks = []
     for msg in messages:
         while len(msg) > 4000:
@@ -88,7 +76,6 @@ def send_telegram_messages(bot_token: str, chat_id: str, messages: List[str]):
         time.sleep(1)
 
 def alert_failure(bot_token: str, chat_id: str, error_msg: str):
-    """Самопроверка: отправка сообщения об ошибке владельцу."""
     if bot_token and chat_id:
         try:
             safe_err = html.escape(str(error_msg)[:500])
@@ -112,14 +99,11 @@ def save_state(state: Dict[str, Any]):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def filter_exact_and_near_duplicates(posts: List[Dict[str, Any]], threshold: float = 0.85) -> (List[Dict[str, Any]], int):
-    """Фильтр текстуально близких копий и репостов."""
     unique_posts = []
     filtered_count = 0
-
     for post in posts:
         norm_text = " ".join(post["text"].lower().split())
         is_duplicate = False
-        
         for u_post in unique_posts:
             target_text = " ".join(u_post["text"].lower().split())
             similarity = difflib.SequenceMatcher(None, norm_text, target_text).quick_ratio()
@@ -129,12 +113,10 @@ def filter_exact_and_near_duplicates(posts: List[Dict[str, Any]], threshold: flo
                     unique_posts.remove(u_post)
                     unique_posts.append(post)
                 break
-
         if is_duplicate:
             filtered_count += 1
         else:
             unique_posts.append(post)
-
     return unique_posts, filtered_count
 
 async def collect_posts(client: TelegramClient, channels: List[str], state: Dict[str, Any]) -> (List[Dict[str, Any]], Dict[str, int]):
@@ -193,7 +175,6 @@ def prune_3d_memory(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return valid_records
 
 def build_grouped_messages(stats_header: str, posts: List[Dict[str, Any]], max_chars: int = 3500) -> List[str]:
-    """Группирует новости по 4-10 штук в одно сообщение Telegram."""
     separator = "\n\n────────────────────\n\n"
     messages = []
     current_message = stats_header
@@ -259,10 +240,10 @@ async def main():
         else:
             clean_from_ads.append(post)
 
-    # Фильтр точных копий
+    # Фильтр точных дублей
     after_exact, exact_dupes_count = filter_exact_and_near_duplicates(clean_from_ads)
 
-    # Фильтр смысловых повторов и сверка с 3-дневной памятью
+    # Фильтр смысловых повторов
     active_history = prune_3d_memory(state.get("history_3d", []))
     past_topics = [h["topic"] for h in active_history]
 
@@ -273,11 +254,11 @@ async def main():
     filtered_past_count = semantic_result["filtered_past_count"]
     filtered_semantic_count = semantic_result["filtered_semantic_count"]
 
-    # Формирование итогового пула постов (от старых к новым)
+    # Формирование итогового пула постов
     final_posts = [p for p in after_exact if p["id"] in selected_ids]
     final_posts.sort(key=lambda p: p["date"])
 
-    # Обновление состояния и памяти
+    # Обновление состояния
     now_iso = datetime.now(timezone.utc).isoformat()
     for topic in semantic_result["new_topics"]:
         active_history.append({"date": now_iso, "topic": topic})
@@ -285,6 +266,9 @@ async def main():
     state["channels"] = updated_channels
     state["history_3d"] = active_history
     save_state(state)
+
+    # Проверка статуса Gemini
+    gemini_status = "Gemini ON✅" if semantic_result.get("gemini_ok", True) else "Gemini OFF❌"
 
     # Статистика воронки
     stats_header = (
@@ -295,10 +279,10 @@ async def main():
         f"• Точных повторов: <b>{exact_dupes_count}</b>\n"
         f"• Смысловых дубликатов: <b>{filtered_semantic_count}</b>\n"
         f"• Повторов сюжетов за 3 дня: <b>{filtered_past_count}</b>\n"
-        f"• <b>Осталось уникальных новостей: {len(final_posts)}</b>"
+        f"• <b>Осталось уникальных новостей: {len(final_posts)}</b>\n"
+        f"• <b>{gemini_status}</b>"
     )
 
-    # Сборка и отправка сообщений
     messages_to_send = build_grouped_messages(stats_header, final_posts)
     send_telegram_messages(bot_token, chat_id, messages_to_send)
     logger.info("Дайджест успешно отправлен.")
