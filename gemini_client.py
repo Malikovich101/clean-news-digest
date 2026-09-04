@@ -10,20 +10,18 @@ logger = logging.getLogger(__name__)
 class SemanticDeduplicator:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
-        # Основная модель и быстрая резервная с лимитом 500 RPD
-        self.models_pool = ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
+        # Расширенный пул моделей: перегрузка одной не остановит пайплайн
+        self.models_pool = [
+            "gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite"
+        ]
 
     def select_unique_and_best_posts(
         self, 
         candidates: List[Dict[str, Any]], 
         past_topics_3d: List[str]
     ) -> Dict[str, Any]:
-        """
-        ИИ выступает исключительно арбитром:
-        1. Исключает сюжеты, уже встречавшиеся за 3 дня.
-        2. Группирует смысловые дубликаты.
-        3. Выбирает ID самой полной оригинальной версии.
-        """
         if not candidates:
             return {
                 "selected_ids": [],
@@ -75,25 +73,13 @@ class SemanticDeduplicator:
         }
 
         safety_settings = [
-            types.SafetySetting(
-                category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                threshold=types.HarmBlockThreshold.BLOCK_NONE,
-            ),
-            types.SafetySetting(
-                category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                threshold=types.HarmBlockThreshold.BLOCK_NONE,
-            ),
-            types.SafetySetting(
-                category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                threshold=types.HarmBlockThreshold.BLOCK_NONE,
-            ),
-            types.SafetySetting(
-                category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                threshold=types.HarmBlockThreshold.BLOCK_NONE,
-            ),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
         ]
 
-        # Каскадный опрос моделей с повторными попытками при 503 High Demand
+        # Каскадный обход моделей с возрастающими паузами (5с и 10с)
         for model_name in self.models_pool:
             for attempt in range(1, 3):
                 try:
@@ -121,8 +107,9 @@ class SemanticDeduplicator:
                         "gemini_ok": True
                     }
                 except Exception as e:
-                    logger.warning(f"Сбой модели {model_name} на попытке {attempt}: {e}")
-                    time.sleep(3)
+                    delay = attempt * 5  # 5 секунд в первой попытке, 10 секунд во второй
+                    logger.warning(f"Сбой модели {model_name} (попытка {attempt}): {e}. Пауза {delay}с...")
+                    time.sleep(delay)
 
         logger.error("Все попытки обращения к пулу моделей Gemini исчерпаны.")
         return {
@@ -132,4 +119,3 @@ class SemanticDeduplicator:
             "filtered_semantic_count": 0,
             "gemini_ok": False
         }
-        
