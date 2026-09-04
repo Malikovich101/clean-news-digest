@@ -9,7 +9,8 @@ logger = logging.getLogger(__name__)
 class SemanticDeduplicator:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
-        self.model = "gemini-2.5-flash"
+        # Актуальная модель Google Gemini
+        self.model = "gemini-3.6-flash"
 
     def select_unique_and_best_posts(
         self, 
