@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+# Добавляем корневую директорию проекта в путь поиска модулей
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from datetime import datetime, timezone, timedelta
 from digest import is_ad_or_junk, is_ad, filter_exact_and_near_duplicates, prune_3d_memory
 
