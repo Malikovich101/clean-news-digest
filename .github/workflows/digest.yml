@@ -2,8 +2,12 @@ name: Run Clean Digest
 
 on:
   schedule:
-    # 3 раза в день: 03:11, 09:11, 16:11 UTC (08:11, 14:11, 21:11 по Перми)
-    - cron: '11 3,9,16 * * *'
+    # Утро: 03:14 UTC (08:14 Пермь)
+    - cron: '14 3 * * *'
+    # День: 09:22 UTC (14:22 Пермь)
+    - cron: '22 9 * * *'
+    # Вечер: 16:08 UTC (21:08 Пермь)
+    - cron: '8 16 * * *'
   workflow_dispatch:
 
 jobs:
@@ -55,3 +59,4 @@ jobs:
           git config --local user.name "GitHub Action"
           git add state.json
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update state and 3d memory [skip ci]" && git push)
+          
