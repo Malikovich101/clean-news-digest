@@ -104,14 +104,14 @@ def filter_exact_and_near_duplicates(posts: List[Dict[str, Any]], threshold: flo
     for post in posts:
         norm_text = " ".join(post["text"].lower().split())
         is_duplicate = False
-        for u_post in unique_posts:
+        for idx, u_post in enumerate(unique_posts):
             target_text = " ".join(u_post["text"].lower().split())
             similarity = difflib.SequenceMatcher(None, norm_text, target_text).quick_ratio()
             if similarity >= threshold:
                 is_duplicate = True
+                # Если новая копия текста полнее и длиннее, заменяем её точечно по индексу
                 if len(post["text"]) > len(u_post["text"]):
-                    unique_posts.remove(u_post)
-                    unique_posts.append(post)
+                    unique_posts[idx] = post
                 break
         if is_duplicate:
             filtered_count += 1
@@ -134,7 +134,8 @@ async def collect_posts(client: TelegramClient, channels: List[str], state: Dict
             channel_title = getattr(entity, "title", channel)
             username = getattr(entity, "username", None)
 
-            messages = await client.get_messages(entity, min_id=last_id, limit=50)
+            # Лимит увеличен до 100 сообщений для активных каналов
+            messages = await client.get_messages(entity, min_id=last_id, limit=100)
             if not messages:
                 continue
 
@@ -258,15 +259,6 @@ async def main():
     final_posts = [p for p in after_exact if p["id"] in selected_ids]
     final_posts.sort(key=lambda p: p["date"])
 
-    # Обновление состояния
-    now_iso = datetime.now(timezone.utc).isoformat()
-    for topic in semantic_result["new_topics"]:
-        active_history.append({"date": now_iso, "topic": topic})
-
-    state["channels"] = updated_channels
-    state["history_3d"] = active_history
-    save_state(state)
-
     # Проверка статуса Gemini
     gemini_status = "Gemini ON✅" if semantic_result.get("gemini_ok", True) else "Gemini OFF❌"
 
@@ -283,9 +275,19 @@ async def main():
         f"• <b>{gemini_status}</b>"
     )
 
+    # Отправка сообщений в Telegram
     messages_to_send = build_grouped_messages(stats_header, final_posts)
     send_telegram_messages(bot_token, chat_id, messages_to_send)
     logger.info("Дайджест успешно отправлен.")
+
+    # Обновление и сохранение состояния СТРОГО ПОСЛЕ успешной отправки
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for topic in semantic_result["new_topics"]:
+        active_history.append({"date": now_iso, "topic": topic})
+
+    state["channels"] = updated_channels
+    state["history_3d"] = active_history
+    save_state(state)
 
 if __name__ == "__main__":
     bot_token = os.getenv("TG_BOT_TOKEN")
@@ -296,3 +298,4 @@ if __name__ == "__main__":
         logger.exception("Критическая ошибка пайплайна")
         alert_failure(bot_token, chat_id, str(e))
         raise
+        
