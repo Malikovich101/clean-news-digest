@@ -11,23 +11,23 @@ class SemanticDeduplicator:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
         # Расширенный пул моделей: перегрузка одной не остановит пайплайн
+        # Актуальные рабочие модели (по таблице пользователя)
         self.models_pool = [
             "gemini-3.6-flash",
             "gemini-3.5-flash-lite",
-            "gemini-3.1-flash-lite"
+            "gemini-3.7-flash"
         ]
 
     def select_unique_and_best_posts(
-        self, 
-        candidates: List[Dict[str, Any]], 
+        self,
+        candidates: List[Dict[str, Any]],
         past_topics_3d: List[str]
     ) -> Dict[str, Any]:
         if not candidates:
             return {
-                "selected_ids": [],
-                "new_topics": [],
-                "filtered_past_count": 0,
-                "filtered_semantic_count": 0,
+                "selected_posts": [],
+                "rejected_as_3d_duplicates": [],
+                "rejected_as_semantic_duplicates": [],
                 "gemini_ok": True
             }
 
@@ -37,27 +37,33 @@ class SemanticDeduplicator:
         ]
 
         system_instruction = (
-            "Ты — строгий редактор-арбитр новостей. Твоя задача — анализировать списки постов.\n"
-            "ПРАВИЛА:\n"
+            "Ты — строгий редактор-арбитр новостей. Твоя задача — анализировать списки Telegram-постов.\n"
+            "Критически важное правило: ОДИНАКОВАЯ ТЕМА ≠ ОДИНАКОВОЕ СОБЫТИЕ.\n"
+            "ПРАВИЛА (строго соблюдать):\n"
             "1. НИКОГДА не переписывай, не сокращай и не сочиняй новости.\n"
-            "2. Сверь посты со списком 'УЖЕ ОСВЕЩЕННЫЕ ТЕМЫ ЗА 3 ДНЯ'. Если пост описывает то же самое событие — отбрось его.\n"
-            "3. Оставшиеся посты сгруппируй по смысловым событиям.\n"
-            "4. В каждой группе выбери ровно ОДИН пост (самый полный, информативный, с фактами).\n"
-            "5. Для каждого выбранного поста сформулируй краткую суть события (до 10 слов) для пополнения памяти.\n"
-            "6. Верни строго валидный JSON."
+            "2. Перед тобой список 'УЖЕ ОСВЕЩЁННЫЕ СОБЫТИЯ ЗА 3 ДНЯ' (recent_3d_events).\n"
+            "   Если пост описывает ТО ЖЕ САМОЕ КОНКРЕТНОЕ СОБЫТИЕ (а не просто похожую тему) — добавь его ID в rejected_as_3d_duplicates.\n"
+            "3. Оставшиеся посты сгруппируй по КОНКРЕТНЫМ СОБЫТИЯМ.\n"
+            "   Объединяй ТОЛЬКО если несколько каналов сообщают ОДНО И ТО ЖЕ СОБЫТИЕ своими словами.\n"
+            "   Пример объединения: 'Apple представила iPhone 18' и 'Apple показала новый iPhone 18'.\n"
+            "   Пример НЕ объединять: 'Apple представила iPhone 18' и 'iPhone 18 поступил в продажу в России' — это разные события.\n"
+            "4. В каждой группе выбери ровно ОДИН пост (самый полный, информативный, с фактами, меньше рекламы/эмоций).\n"
+            "   Добавь выбранный пост в selected_posts с ключами: selected_post_id (ID поста) и topic_summary (краткая суть события, до 12 слов, конкретное событие, не общая тема).\n"
+            "5. Если есть сомнение, что два поста — одно событие — НЕ объединяй их. Лучше оставить две похожие новости, чем потерять отдельный инфоповод.\n"
+            "6. Для каждого удалённого смыслового дубля добавь его пост-ID в rejected_as_semantic_duplicates (только дубли, не выбранные посты).\n"
+            "7. Верни строго валидный JSON с тремя массивами: selected_posts, rejected_as_3d_duplicates, rejected_as_semantic_duplicates.\n"
+            "8. Формулировка topic_summary должна отвечать на вопрос: 'Какое конкретное событие?' (например, 'Apple представила iPhone 18'), а не 'О чём тема?' (не 'Apple и технологии')."
         )
 
         prompt = {
-            "recent_3d_topics": past_topics_3d,
+            "recent_3d_events": past_topics_3d,
             "incoming_posts": items_payload
         }
 
         schema = {
             "type": "OBJECT",
             "properties": {
-                "rejected_as_3d_dupes_count": {"type": "INTEGER"},
-                "semantic_groups_merged_count": {"type": "INTEGER"},
-                "results": {
+                "selected_posts": {
                     "type": "ARRAY",
                     "items": {
                         "type": "OBJECT",
@@ -67,9 +73,17 @@ class SemanticDeduplicator:
                         },
                         "required": ["selected_post_id", "topic_summary"]
                     }
+                },
+                "rejected_as_3d_duplicates": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"}
+                },
+                "rejected_as_semantic_duplicates": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"}
                 }
             },
-            "required": ["rejected_as_3d_dupes_count", "semantic_groups_merged_count", "results"]
+            "required": ["selected_posts", "rejected_as_3d_duplicates", "rejected_as_semantic_duplicates"]
         }
 
         safety_settings = [
@@ -96,15 +110,23 @@ class SemanticDeduplicator:
                         )
                     )
                     data = json.loads(response.text)
-                    selected_ids = [item["selected_post_id"] for item in data.get("results", [])]
-                    new_topics = [item["topic_summary"] for item in data.get("results", [])]
+
+                    selected_posts = data.get("selected_posts", [])
+                    rejected_3d = data.get("rejected_as_3d_duplicates", [])
+                    rejected_semantic = data.get("rejected_as_semantic_duplicates", [])
+
+                    selected_ids = [item["selected_post_id"] for item in selected_posts]
+                    new_topics = [item["topic_summary"] for item in selected_posts]
 
                     return {
                         "selected_ids": selected_ids,
                         "new_topics": new_topics,
-                        "filtered_past_count": data.get("rejected_as_3d_dupes_count", 0),
-                        "filtered_semantic_count": data.get("semantic_groups_merged_count", 0),
-                        "gemini_ok": True
+                        "filtered_past_count": len(rejected_3d),
+                        "filtered_semantic_count": len(rejected_semantic),
+                        "gemini_ok": True,
+                        # Также сохраняем явные списки для надёжности
+                        "rejected_semantic_ids": rejected_semantic,
+                        "rejected_3d_ids": rejected_3d,
                     }
                 except Exception as e:
                     delay = attempt * 5  # 5 секунд в первой попытке, 10 секунд во второй
@@ -112,10 +134,13 @@ class SemanticDeduplicator:
                     time.sleep(delay)
 
         logger.error("Все попытки обращения к пулу моделей Gemini исчерпаны.")
+        # При полном отказе: не удаляем ничего, выбираем всё (безопасный режим)
         return {
             "selected_ids": [c["id"] for c in candidates],
-            "new_topics": [],
+            "new_topics": [f"Событие из поста {c['id']}" for c in candidates],
             "filtered_past_count": 0,
             "filtered_semantic_count": 0,
-            "gemini_ok": False
+            "gemini_ok": False,
+            "rejected_semantic_ids": [],
+            "rejected_3d_ids": [],
         }
