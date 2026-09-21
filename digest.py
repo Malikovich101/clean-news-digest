@@ -253,7 +253,9 @@ async def main():
 
     selected_ids = set(semantic_result["selected_ids"])
     filtered_past_count = semantic_result["filtered_past_count"]
-    filtered_semantic_count = semantic_result["filtered_semantic_count"]
+    # Python — источник истины для статистики. Gemini возвращает явные списки,
+    # из которых Python считает. Защита от отрицательных значений.
+    filtered_semantic_count = max(0, semantic_result.get("filtered_semantic_count", 0))
 
     # Формирование итогового пула постов
     final_posts = [p for p in after_exact if p["id"] in selected_ids]
